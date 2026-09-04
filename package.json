@@ -1,0 +1,16 @@
+{
+    "name": "recall",
+    "private": true,
+    "workspaces": [
+        "apps/*",
+        "server"
+    ],
+    "scripts": {
+        "mobile": "npm run start --workspace @recall/mobile",
+        "mobile:typecheck": "npm run typecheck --workspace @recall/mobile",
+        "server": "npm run dev --workspace @recall/server",
+        "server:build": "npm run build --workspace @recall/server",
+        "server:typecheck": "npm run typecheck --workspace @recall/server",
+        "typecheck": "npm run mobile:typecheck && npm run server:typecheck"
+    }
+}

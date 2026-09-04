@@ -1,0 +1,14 @@
+{
+    "expo": {
+        "name": "Recall",
+        "slug": "recall",
+        "version": "0.1.0",
+        "orientation": "portrait",
+        "userInterfaceStyle": "automatic",
+        "newArchEnabled": true,
+        "ios": {
+            "supportsTablet": false
+        },
+        "android": {}
+    }
+}
