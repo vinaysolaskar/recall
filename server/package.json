@@ -1,0 +1,25 @@
+{
+    "name": "@recall/server",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "tsx watch src/index.ts",
+        "build": "tsc",
+        "supabase:check": "tsx src/infrastructure/supabase/check.ts",
+        "start": "node dist/index.js",
+        "typecheck": "tsc --noEmit"
+    },
+    "dependencies": {
+        "@supabase/supabase-js": "^2.109.0",
+        "@types/ws": "^8.18.1",
+        "dotenv": "^17.4.2",
+        "express": "^5.1.0",
+        "ws": "^8.21.3"
+    },
+    "devDependencies": {
+        "@types/express": "^5.0.3",
+        "tsx": "^4.20.5",
+        "typescript": "~5.9.2"
+    }
+}
