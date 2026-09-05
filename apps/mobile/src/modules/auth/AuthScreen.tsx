@@ -1,12 +1,15 @@
 import { useState } from 'react';
-import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import type { Session } from '@supabase/supabase-js';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { supabase } from '../../infrastructure/supabase/client';
+import { MemoryListScreen } from '../memory/screens/MemoryListScreen';
 
 type Mode = 'login' | 'register';
 
 export function AuthenticationScreen() {
+    const insets = useSafeAreaInsets();
     const [mode, setMode] = useState<Mode>('login');
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
@@ -62,7 +65,7 @@ export function AuthenticationScreen() {
     }
 
     return (
-        <SafeAreaView style={styles.safeArea}>
+        <View style={[styles.safeArea, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
             <View style={styles.content}>
                 <Text style={styles.eyebrow}>RECALL</Text>
                 <Text style={styles.title}>{isRegistering ? 'Create your account' : 'Welcome back'}</Text>
@@ -79,29 +82,17 @@ export function AuthenticationScreen() {
                     <Text style={styles.secondaryText}>{isRegistering ? 'Already have an account? Log in' : 'Need an account? Register'}</Text>
                 </Pressable>
             </View>
-        </SafeAreaView>
+        </View>
     );
 }
 
 export function AuthenticatedHome({ session }: { session: Session }) {
-    const [error, setError] = useState('');
-
     async function logout() {
         const { error: signOutError } = await supabase.auth.signOut();
-        if (signOutError) setError('Could not log out. Please try again.');
+        return signOutError ? 'Could not log out. Please try again.' : null;
     }
 
-    return (
-        <SafeAreaView style={styles.safeArea}>
-            <View style={styles.content}>
-                <Text style={styles.eyebrow}>RECALL</Text>
-                <Text style={styles.title}>You are signed in</Text>
-                <Text style={styles.subtitle}>{session.user.email ?? 'Authenticated user'}</Text>
-                {error ? <Text style={styles.error}>{error}</Text> : null}
-                <Pressable onPress={logout} style={styles.primaryButton}><Text style={styles.primaryText}>Log out</Text></Pressable>
-            </View>
-        </SafeAreaView>
-    );
+    return <MemoryListScreen onLogout={logout} userEmail={session.user.email ?? null} userId={session.user.id} />;
 }
 
 function getAuthError(message: string, registering: boolean) {
