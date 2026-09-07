@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import type { Session } from '@supabase/supabase-js';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { supabase } from './src/infrastructure/supabase/client';
 import { AuthenticatedHome, AuthenticationScreen } from './src/modules/auth/AuthScreen';
@@ -37,13 +38,13 @@ export default function App() {
         };
     }, []);
 
-    if (loading) {
-        return (
-            <View style={{ alignItems: 'center', backgroundColor: '#f7f4ed', flex: 1, justifyContent: 'center' }}>
-                <ActivityIndicator color="#d96c4f" />
-            </View>
-        );
-    }
-
-    return session ? <AuthenticatedHome session={session} /> : <AuthenticationScreen />;
+    return (
+        <SafeAreaProvider>
+            {loading ? (
+                <View style={{ alignItems: 'center', backgroundColor: '#f7f4ed', flex: 1, justifyContent: 'center' }}>
+                    <ActivityIndicator color="#d96c4f" />
+                </View>
+            ) : session ? <AuthenticatedHome session={session} /> : <AuthenticationScreen />}
+        </SafeAreaProvider>
+    );
 }
