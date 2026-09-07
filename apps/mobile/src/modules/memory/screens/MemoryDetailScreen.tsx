@@ -19,6 +19,7 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [addingCapture, setAddingCapture] = useState(false);
+    const [selectedCaptureId, setSelectedCaptureId] = useState<string | null>(null);
 
     useEffect(() => {
         let mounted = true;
@@ -109,6 +110,11 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
         );
     }
 
+    const selectedCapture = selectedCaptureId ? data.captures.find((capture) => capture.id === selectedCaptureId) : null;
+    if (selectedCapture) {
+        return <CaptureView capture={selectedCapture} onBack={() => setSelectedCaptureId(null)} onSave={updateCapture} />;
+    }
+
     return (
         <View style={[styles.safeArea, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
             <ScrollView contentContainerStyle={styles.content}>
@@ -128,11 +134,27 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
                             <View style={styles.captureBody}>
                                 <Text style={styles.captureType}>{capture.type.toUpperCase()} CAPTURE</Text>
                                 <Text style={styles.captureDate}>{formatDate(capture.capturedAt)}</Text>
-                                <EditableCapture capture={capture} onSave={updateCapture} />
+                                <Text numberOfLines={4} style={styles.capturePreview}>{getPreview(capture.text)}</Text>
+                                <Pressable onPress={() => setSelectedCaptureId(capture.id)} style={styles.viewCaptureButton}><Text style={styles.viewCaptureText}>View Capture</Text></Pressable>
                             </View>
                         </View>
                     ))}
                 </View>
+            </ScrollView>
+        </View>
+    );
+}
+
+function CaptureView({ capture, onBack, onSave }: { capture: Capture; onBack: () => void; onSave: (capture: Capture, text: string) => Promise<boolean> }) {
+    const insets = useSafeAreaInsets();
+
+    return (
+        <View style={[styles.safeArea, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
+            <ScrollView contentContainerStyle={styles.content}>
+                <Pressable hitSlop={8} onPress={onBack} style={styles.backButton}><Text style={styles.backText}>Back</Text></Pressable>
+                <Text style={styles.eyebrow}>{capture.type.toUpperCase()} CAPTURE</Text>
+                <Text style={styles.captureDate}>{formatDate(capture.capturedAt)}</Text>
+                <EditableCapture capture={capture} onSave={onSave} />
             </ScrollView>
         </View>
     );
@@ -158,7 +180,7 @@ function EditableCapture({ capture, onSave }: { capture: Capture; onSave: (captu
 
     return (
         <>
-            <TextInput maxLength={10000} multiline onChangeText={(value) => { setText(value); setEditError(''); }} style={styles.editInput} textAlignVertical="top" value={text} />
+            <TextInput maxLength={10000} multiline onChangeText={(value) => { setText(value); setEditError(''); }} scrollEnabled style={styles.editInput} textAlignVertical="top" value={text} />
             <Text style={styles.counter}>{text.length.toLocaleString()} / 10,000</Text>
             {editError ? <Text style={styles.error}>{editError}</Text> : null}
             <View style={styles.editActions}>
@@ -178,6 +200,11 @@ function EditableCapture({ capture, onSave }: { capture: Capture; onSave: (captu
 
 function formatDate(value: string): string {
     return new Date(value).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function getPreview(text: string): string {
+    const singleLine = text.replace(/\s+/g, ' ').trim();
+    return singleLine.length > 240 ? `${singleLine.slice(0, 240)}...` : singleLine;
 }
 
 const styles = StyleSheet.create({
@@ -203,10 +230,13 @@ const styles = StyleSheet.create({
     captureBody: { flex: 1, paddingBottom: 28, paddingLeft: 14 },
     captureType: { color: '#39735b', fontSize: 12, fontWeight: '800', letterSpacing: 1 },
     captureDate: { color: '#7a746d', fontSize: 13, marginBottom: 10, marginTop: 4 },
+    capturePreview: { color: '#1d2a24', fontSize: 17, lineHeight: 25 },
+    viewCaptureButton: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', paddingTop: 8 },
+    viewCaptureText: { color: '#39735b', fontSize: 14, fontWeight: '700' },
     captureText: { color: '#1d2a24', fontSize: 17, lineHeight: 25 },
-    editButton: { alignSelf: 'flex-start', paddingTop: 12 },
+    editButton: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', paddingTop: 8 },
     editText: { color: '#39735b', fontSize: 14, fontWeight: '600' },
-    editInput: { backgroundColor: '#fffaf3', borderColor: '#d9d0c4', borderRadius: 8, borderWidth: 1, color: '#1d2a24', minHeight: 110, padding: 12 },
+    editInput: { backgroundColor: '#fffaf3', borderColor: '#d9d0c4', borderRadius: 8, borderWidth: 1, color: '#1d2a24', height: 220, padding: 12 },
     counter: { color: '#7a746d', fontSize: 13, marginTop: 6, textAlign: 'right' },
     editActions: { flexDirection: 'row', gap: 12, justifyContent: 'flex-end', marginTop: 10 },
     cancelButton: { justifyContent: 'center', paddingHorizontal: 12 },

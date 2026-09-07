@@ -30,8 +30,8 @@ export function CreateTextMemoryScreen({ saveText, onCancel, onSaved, title = 'W
         try {
             const result = await saveText(normalizedText);
             onSaved(result);
-        } catch {
-            setError('Could not save this Memory locally. Please try again.');
+        } catch (saveError) {
+            setError(saveError instanceof Error ? saveError.message : 'Could not save this Memory locally. Please try again.');
         } finally {
             setSaving(false);
         }

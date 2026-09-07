@@ -9,6 +9,7 @@ type LocalMemoryData = {
 };
 
 const emptyData: LocalMemoryData = { memories: [], captures: [] };
+const MAX_MEMORIES = 5;
 
 function createId(): string {
     const randomUuid = globalThis.crypto?.randomUUID;
@@ -56,6 +57,11 @@ export class LocalMemoryRepository implements MemoryRepository {
     }
 
     public async createTextMemory(text: string): Promise<MemoryWithCaptures> {
+        const existingData = await this.readData();
+        if (existingData.memories.length >= MAX_MEMORIES) {
+            throw new Error('Memory limit reached. You can save up to 5 Memories.');
+        }
+
         const now = new Date().toISOString();
         const memory: Memory = {
             id: createId(),
