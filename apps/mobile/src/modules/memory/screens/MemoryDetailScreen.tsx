@@ -2,10 +2,11 @@ import { useEffect, useState } from 'react';
 import { Alert, ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import type { Capture } from '../domain/types';
+import type { Capture, TextCapture } from '../domain/types';
 import type { LocalMemoryRepository } from '../data/localRepository';
 import type { MemoryWithCaptures } from '../data/repository';
 import { CreateTextMemoryScreen } from './CreateTextMemoryScreen';
+import { VoiceRecordingScreen } from './VoiceRecordingScreen';
 
 type MemoryDetailScreenProps = {
     memoryId: string;
@@ -19,6 +20,7 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [addingCapture, setAddingCapture] = useState(false);
+    const [addingVoiceCapture, setAddingVoiceCapture] = useState(false);
     const [selectedCaptureId, setSelectedCaptureId] = useState<string | null>(null);
 
     useEffect(() => {
@@ -110,7 +112,22 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
         );
     }
 
-    const selectedCapture = selectedCaptureId ? data.captures.find((capture) => capture.id === selectedCaptureId) : null;
+    if (addingVoiceCapture) {
+        return (
+            <VoiceRecordingScreen
+                memoryId={memoryId}
+                onBack={() => setAddingVoiceCapture(false)}
+                onSaved={(result) => {
+                    setData(result);
+                    setAddingVoiceCapture(false);
+                }}
+                repository={repository}
+                saveAsNewMemory={false}
+            />
+        );
+    }
+
+    const selectedCapture = selectedCaptureId ? data.captures.find((capture): capture is TextCapture => capture.id === selectedCaptureId && capture.type === 'text') : null;
     if (selectedCapture) {
         return <CaptureView capture={selectedCapture} onBack={() => setSelectedCaptureId(null)} onSave={updateCapture} />;
     }
@@ -126,6 +143,7 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
                 <Text style={styles.title}>{formatDate(data.memory.createdAt)}</Text>
                 <Text style={styles.meta}>{data.captures.length} {data.captures.length === 1 ? 'Capture' : 'Captures'}</Text>
                 <Pressable onPress={() => setAddingCapture(true)} style={styles.addCaptureButton}><Text style={styles.addCaptureText}>+ Add Capture</Text></Pressable>
+                <Pressable onPress={() => setAddingVoiceCapture(true)} style={styles.addVoiceCaptureButton}><Text style={styles.addVoiceCaptureText}>+ Add Voice Capture</Text></Pressable>
                 {error ? <Text style={styles.error}>{error}</Text> : null}
                 <View style={styles.timeline}>
                     {data.captures.map((capture, index) => (
@@ -134,8 +152,14 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
                             <View style={styles.captureBody}>
                                 <Text style={styles.captureType}>{capture.type.toUpperCase()} CAPTURE</Text>
                                 <Text style={styles.captureDate}>{formatDate(capture.capturedAt)}</Text>
-                                <Text numberOfLines={4} style={styles.capturePreview}>{getPreview(capture.text)}</Text>
-                                <Pressable onPress={() => setSelectedCaptureId(capture.id)} style={styles.viewCaptureButton}><Text style={styles.viewCaptureText}>View Capture</Text></Pressable>
+                                {capture.type === 'text' ? (
+                                    <>
+                                        <Text numberOfLines={4} style={styles.capturePreview}>{getPreview(capture.text)}</Text>
+                                        <Pressable onPress={() => setSelectedCaptureId(capture.id)} style={styles.viewCaptureButton}><Text style={styles.viewCaptureText}>View Capture</Text></Pressable>
+                                    </>
+                                ) : (
+                                    <Text style={styles.capturePreview}>{formatDuration(capture.durationSeconds)} · Original audio saved</Text>
+                                )}
                             </View>
                         </View>
                     ))}
@@ -145,7 +169,7 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
     );
 }
 
-function CaptureView({ capture, onBack, onSave }: { capture: Capture; onBack: () => void; onSave: (capture: Capture, text: string) => Promise<boolean> }) {
+function CaptureView({ capture, onBack, onSave }: { capture: TextCapture; onBack: () => void; onSave: (capture: Capture, text: string) => Promise<boolean> }) {
     const insets = useSafeAreaInsets();
 
     return (
@@ -160,7 +184,7 @@ function CaptureView({ capture, onBack, onSave }: { capture: Capture; onBack: ()
     );
 }
 
-function EditableCapture({ capture, onSave }: { capture: Capture; onSave: (capture: Capture, text: string) => Promise<boolean> }) {
+function EditableCapture({ capture, onSave }: { capture: TextCapture; onSave: (capture: Capture, text: string) => Promise<boolean> }) {
     const [editing, setEditing] = useState(false);
     const [text, setText] = useState(capture.text);
     const [editError, setEditError] = useState('');
@@ -207,6 +231,10 @@ function getPreview(text: string): string {
     return singleLine.length > 240 ? `${singleLine.slice(0, 240)}...` : singleLine;
 }
 
+function formatDuration(seconds: number): string {
+    return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
 const styles = StyleSheet.create({
     safeArea: { backgroundColor: '#f7f4ed', flex: 1 },
     centered: { alignItems: 'center', backgroundColor: '#f7f4ed', flex: 1, justifyContent: 'center' },
@@ -221,6 +249,8 @@ const styles = StyleSheet.create({
     meta: { color: '#7a746d', fontSize: 14, marginBottom: 24 },
     addCaptureButton: { alignItems: 'center', alignSelf: 'flex-start', borderColor: '#39735b', borderRadius: 8, borderWidth: 1, minHeight: 44, justifyContent: 'center', marginBottom: 24, paddingHorizontal: 14 },
     addCaptureText: { color: '#39735b', fontSize: 15, fontWeight: '700' },
+    addVoiceCaptureButton: { alignItems: 'center', alignSelf: 'flex-start', borderColor: '#d96c4f', borderRadius: 8, borderWidth: 1, minHeight: 44, justifyContent: 'center', marginBottom: 24, paddingHorizontal: 14 },
+    addVoiceCaptureText: { color: '#d96c4f', fontSize: 15, fontWeight: '700' },
     error: { color: '#b33a32', fontSize: 14, marginBottom: 12 },
     timeline: { paddingTop: 4 },
     timelineItem: { flexDirection: 'row' },

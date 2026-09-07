@@ -11,6 +11,19 @@ type LocalMemoryData = {
 const emptyData: LocalMemoryData = { memories: [], captures: [] };
 const MAX_MEMORIES = 5;
 
+function createMemoryCapture(memoryId: string, audioUri: string, durationSeconds: number, now: string): Capture {
+    return {
+        id: createId(),
+        memoryId,
+        type: 'voice',
+        audioUri,
+        durationSeconds,
+        capturedAt: now,
+        createdAt: now,
+        updatedAt: now,
+    };
+}
+
 function createId(): string {
     const randomUuid = globalThis.crypto?.randomUUID;
     if (randomUuid) {
@@ -83,6 +96,19 @@ export class LocalMemoryRepository implements MemoryRepository {
         return { memory, captures: [capture] };
     }
 
+    public async createVoiceMemory(audioUri: string, durationSeconds: number): Promise<MemoryWithCaptures> {
+        const existingData = await this.readData();
+        if (existingData.memories.length >= MAX_MEMORIES) {
+            throw new Error('Memory limit reached. You can save up to 5 Memories.');
+        }
+
+        const now = new Date().toISOString();
+        const memory: Memory = { id: createId(), createdAt: now, updatedAt: now, folderId: null };
+        const capture = createMemoryCapture(memory.id, audioUri, durationSeconds, now);
+        await this.writeData({ memories: [memory], captures: [capture] }, true);
+        return { memory, captures: [capture] };
+    }
+
     public async addTextCapture(memoryId: string, text: string): Promise<MemoryWithCaptures> {
         const data = await this.readData();
         const memoryIndex = data.memories.findIndex((item) => item.id === memoryId);
@@ -111,11 +137,34 @@ export class LocalMemoryRepository implements MemoryRepository {
         };
     }
 
+    public async addVoiceCapture(memoryId: string, audioUri: string, durationSeconds: number): Promise<MemoryWithCaptures> {
+        const data = await this.readData();
+        const memoryIndex = data.memories.findIndex((item) => item.id === memoryId);
+        if (memoryIndex === -1) {
+            throw new Error('Memory not found.');
+        }
+
+        const now = new Date().toISOString();
+        const capture = createMemoryCapture(memoryId, audioUri, durationSeconds, now);
+        const memory: Memory = { ...data.memories[memoryIndex], updatedAt: now };
+        data.memories[memoryIndex] = memory;
+        data.captures.push(capture);
+        await this.writeData(data);
+
+        return {
+            memory,
+            captures: sortCaptures(data.captures.filter((item) => item.memoryId === memoryId)),
+        };
+    }
+
     public async updateTextCapture(captureId: string, text: string): Promise<MemoryWithCaptures> {
         const data = await this.readData();
         const capture = data.captures.find((item) => item.id === captureId);
         if (!capture) {
             throw new Error('Capture not found.');
+        }
+        if (capture.type !== 'text') {
+            throw new Error('Only text Captures can be edited as text.');
         }
 
         const now = new Date().toISOString();
