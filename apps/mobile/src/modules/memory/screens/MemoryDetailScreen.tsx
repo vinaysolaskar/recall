@@ -1,10 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Alert, ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import type { Capture, TextCapture } from '../domain/types';
+import type { AudioStatus } from 'expo-audio';
+import type { Capture, TextCapture, VoiceCapture } from '../domain/types';
 import type { LocalMemoryRepository } from '../data/localRepository';
 import type { MemoryWithCaptures } from '../data/repository';
+import { syncVoiceCapture } from '../data/voiceSync';
 import { CreateTextMemoryScreen } from './CreateTextMemoryScreen';
 import { VoiceRecordingScreen } from './VoiceRecordingScreen';
 
@@ -22,9 +25,56 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
     const [addingCapture, setAddingCapture] = useState(false);
     const [addingVoiceCapture, setAddingVoiceCapture] = useState(false);
     const [selectedCaptureId, setSelectedCaptureId] = useState<string | null>(null);
+    const [activeCaptureId, setActiveCaptureId] = useState<string | null>(null);
+    const [pausedCaptureId, setPausedCaptureId] = useState<string | null>(null);
+    const [finishedCaptureId, setFinishedCaptureId] = useState<string | null>(null);
+    // Captures already attempted during this screen mount. Without this, every
+    // surfaced state change re-armed the upload effect and a failed upload
+    // looped forever, flashing through sync messages (the reported flicker).
+    // A fresh mount clears it, so pending captures still retry on the next open.
+    const attemptedSyncIdsRef = useRef<Set<string>>(new Set());
+
+    // A single player is shared by every Voice Capture on this screen so only one
+    // Capture can play at a time. The hook releases the native player on unmount.
+    const player = useAudioPlayer(null);
+    const playerStatus = useAudioPlayerStatus(player);
+
+    // Automatically upload voice audio that has not been uploaded yet (new local
+    // captures and captures that were left as pending after an offline recording).
+    useEffect(() => {
+        if (!data) {
+            return;
+        }
+        const candidates = data.captures.filter((capture): capture is VoiceCapture =>
+            capture.type === 'voice'
+            && (capture.syncStatus === 'local'
+                || capture.syncStatus === 'upload_pending'
+                // A crash mid-upload leaves 'uploading'; the server tolerates a
+                // repeated upload, so it is safe to retry.
+                || capture.syncStatus === 'uploading')
+            && !attemptedSyncIdsRef.current.has(capture.id));
+        if (candidates.length === 0) {
+            return;
+        }
+        // Mark as attempted synchronously so state updates from the sync itself
+        // (for example 'uploading') cannot re-trigger another attempt.
+        candidates.forEach((capture) => attemptedSyncIdsRef.current.add(capture.id));
+        void Promise.all(candidates.map(async (capture) => {
+            try {
+                const updated = await syncVoiceCapture(repository, data.memory, capture, setData);
+                if (updated) {
+                    setData(updated);
+                }
+            } catch {
+                // Upload failed locally; the Capture keeps its previous state and can be retried later.
+            }
+        }));
+    }, [data, repository]);
 
     useEffect(() => {
         let mounted = true;
+        // Each loaded Memory gets its own set of upload attempts.
+        attemptedSyncIdsRef.current = new Set();
         repository.getMemory(memoryId).then((result) => {
             if (mounted) {
                 setData(result);
@@ -41,6 +91,60 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
             mounted = false;
         };
     }, [memoryId, repository]);
+
+    // Detect natural playback completion so the Capture returns to a replayable
+    // state instead of sticking on a stale "playing" UI.
+    useEffect(() => {
+        if (playerStatus.didJustFinish && activeCaptureId) {
+            setFinishedCaptureId(activeCaptureId);
+            setPausedCaptureId(null);
+        }
+    }, [activeCaptureId, playerStatus.didJustFinish]);
+
+    // Never play audio over a new recording: pausing on the way into the record
+    // screen keeps the microphone clean. The capture stays replayable afterwards.
+    useEffect(() => {
+        if (addingVoiceCapture && activeCaptureId) {
+            player.pause();
+            setPausedCaptureId(activeCaptureId);
+        }
+    }, [activeCaptureId, addingVoiceCapture, player]);
+
+    function requestPlay(captureId: string) {
+        const capture = data?.captures.find((item) => item.id === captureId);
+        if (!capture || capture.type !== 'voice') {
+            return;
+        }
+
+        if (activeCaptureId === captureId && finishedCaptureId === captureId) {
+            // Replay from the start.
+            player.replace(capture.audioUri);
+            player.play();
+            setFinishedCaptureId(null);
+            setPausedCaptureId(null);
+            return;
+        }
+        if (activeCaptureId === captureId && pausedCaptureId === captureId) {
+            // Resume.
+            player.play();
+            setPausedCaptureId(null);
+            return;
+        }
+        if (activeCaptureId === captureId) {
+            // Pause the active Capture.
+            player.pause();
+            setPausedCaptureId(captureId);
+            return;
+        }
+
+        // Starting another Capture stops/resets the previous one by swapping the
+        // single shared player to the new source.
+        player.replace(capture.audioUri);
+        player.play();
+        setActiveCaptureId(captureId);
+        setPausedCaptureId(null);
+        setFinishedCaptureId(null);
+    }
 
     async function updateCapture(capture: Capture, text: string): Promise<boolean> {
         const normalizedText = text.trim();
@@ -158,7 +262,14 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
                                         <Pressable onPress={() => setSelectedCaptureId(capture.id)} style={styles.viewCaptureButton}><Text style={styles.viewCaptureText}>View Capture</Text></Pressable>
                                     </>
                                 ) : (
-                                    <Text style={styles.capturePreview}>{formatDuration(capture.durationSeconds)} · Original audio saved</Text>
+                                    <VoiceCaptureControls
+                                        capture={capture}
+                                        finished={finishedCaptureId === capture.id}
+                                        isActive={activeCaptureId === capture.id}
+                                        onToggle={() => requestPlay(capture.id)}
+                                        paused={pausedCaptureId === capture.id}
+                                        playerStatus={playerStatus}
+                                    />
                                 )}
                             </View>
                         </View>
@@ -226,13 +337,79 @@ function formatDate(value: string): string {
     return new Date(value).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+type VoiceCaptureControlsProps = {
+    capture: VoiceCapture;
+    playerStatus: AudioStatus;
+    isActive: boolean;
+    paused: boolean;
+    finished: boolean;
+    onToggle: () => void;
+};
+
+function VoiceCaptureControls({ capture, playerStatus, isActive, paused, finished, onToggle }: VoiceCaptureControlsProps) {
+    const syncLabel = getSyncLabel(capture);
+    let buttonLabel = 'Play';
+    if (isActive && paused) {
+        buttonLabel = 'Resume';
+    } else if (isActive && finished) {
+        buttonLabel = 'Replay';
+    } else if (isActive) {
+        buttonLabel = 'Pause';
+    }
+
+    return (
+        <>
+            <View style={styles.playbackRow}>
+                <Pressable onPress={onToggle} style={styles.playButton}>
+                    <Text style={styles.playButtonText}>{buttonLabel}</Text>
+                </Pressable>
+                <Text style={styles.playbackPosition}>
+                    {formatDuration(isActive ? playerStatus.currentTime : capture.durationSeconds)}
+                    {' / '}
+                    {formatDuration(isActive && playerStatus.duration > 0 ? playerStatus.duration : capture.durationSeconds)}
+                </Text>
+            </View>
+            <Text style={styles.syncStatus}>{syncLabel}</Text>
+        </>
+    );
+}
+
+function getSyncLabel(capture: VoiceCapture): string {
+    if (capture.syncStatus === 'failed') {
+        return capture.syncError || 'Upload failed. The recording stays saved on this device.';
+    }
+    if (capture.syncStatus === 'upload_pending') {
+        return 'Waiting to sync';
+    }
+    if (capture.syncStatus === 'uploading') {
+        return 'Uploading…';
+    }
+    if (capture.syncStatus === 'uploaded') {
+        // The upload itself succeeded; the label reflects the processing stage.
+        switch (capture.processingStatus) {
+            case 'completed':
+                return 'Ready';
+            case 'processing':
+                return 'Transcribing…';
+            case 'failed':
+                return 'Processing failed. The recording stays saved on this device.';
+            default:
+                return 'Processing…';
+        }
+    }
+    return 'Saved on device';
+}
+
 function getPreview(text: string): string {
     const singleLine = text.replace(/\s+/g, ' ').trim();
     return singleLine.length > 240 ? `${singleLine.slice(0, 240)}...` : singleLine;
 }
 
 function formatDuration(seconds: number): string {
-    return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+    // Player positions arrive as high-precision floats (for example
+    // 1.0089999437332153); display must always be whole seconds as MM:SS.
+    const wholeSeconds = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
+    return `${String(Math.floor(wholeSeconds / 60)).padStart(2, '0')}:${String(wholeSeconds % 60).padStart(2, '0')}`;
 }
 
 const styles = StyleSheet.create({
@@ -261,6 +438,11 @@ const styles = StyleSheet.create({
     captureType: { color: '#39735b', fontSize: 12, fontWeight: '800', letterSpacing: 1 },
     captureDate: { color: '#7a746d', fontSize: 13, marginBottom: 10, marginTop: 4 },
     capturePreview: { color: '#1d2a24', fontSize: 17, lineHeight: 25 },
+    playbackRow: { alignItems: 'center', flexDirection: 'row', gap: 14 },
+    playButton: { alignItems: 'center', backgroundColor: '#39735b', borderRadius: 8, justifyContent: 'center', minHeight: 40, minWidth: 96, paddingHorizontal: 14 },
+    playButtonText: { color: '#fffaf3', fontSize: 14, fontWeight: '700' },
+    playbackPosition: { color: '#52635b', fontSize: 14, fontVariant: ['tabular-nums'] },
+    syncStatus: { color: '#7a746d', fontSize: 13, marginTop: 8 },
     viewCaptureButton: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', paddingTop: 8 },
     viewCaptureText: { color: '#39735b', fontSize: 14, fontWeight: '700' },
     captureText: { color: '#1d2a24', fontSize: 17, lineHeight: 25 },

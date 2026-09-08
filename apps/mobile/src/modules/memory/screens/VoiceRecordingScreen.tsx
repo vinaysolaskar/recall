@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useAudioRecorder, requestRecordingPermissionsAsync, RecordingPresets } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -143,6 +143,23 @@ export function VoiceRecordingScreen({ repository, memoryId, onBack, onSaved, sa
         // cleared when its owning effect teardown runs on unmount.
         recordingRef.current = false;
         finishingRef.current = true;
+    }, []);
+
+    useEffect(() => {
+        if (!AppState.isAvailable) {
+            return;
+        }
+        const subscription = AppState.addEventListener('change', (nextState) => {
+            // App switching / screen lock / incoming call / notification shade all
+            // transition the app to inactive or background. Stop recording through
+            // the single existing stop+finalization path so it is guarded against
+            // duplicate stop/finalization (manual Stop, 15-min limit, native
+            // completion, and this interruption all collapse onto the same path).
+            if ((nextState === 'inactive' || nextState === 'background') && recordingRef.current && !finishingRef.current) {
+                void handleStop('interrupted');
+            }
+        });
+        return () => subscription.remove();
     }, []);
 
     async function startRecording() {

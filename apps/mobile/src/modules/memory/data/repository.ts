@@ -1,4 +1,4 @@
-import type { Capture, Memory } from '../domain/types';
+import type { Capture, Memory, ProcessingStatus, SyncStatus } from '../domain/types';
 
 export type MemoryWithCaptures = {
     memory: Memory;
@@ -13,5 +13,6 @@ export interface MemoryRepository {
     addTextCapture(memoryId: string, text: string): Promise<MemoryWithCaptures>;
     addVoiceCapture(memoryId: string, audioUri: string, durationSeconds: number): Promise<MemoryWithCaptures>;
     updateTextCapture(captureId: string, text: string): Promise<MemoryWithCaptures>;
+    updateCaptureSync(captureId: string, syncStatus: SyncStatus, syncError?: string | null, processingStatus?: ProcessingStatus): Promise<MemoryWithCaptures>;
     deleteMemory(id: string): Promise<void>;
 }
