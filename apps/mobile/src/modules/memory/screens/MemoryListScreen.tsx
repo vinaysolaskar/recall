@@ -6,6 +6,7 @@ import type { Memory } from '../domain/types';
 import { LocalMemoryRepository } from '../data/localRepository';
 import { CreateTextMemoryScreen } from './CreateTextMemoryScreen';
 import { MemoryDetailScreen } from './MemoryDetailScreen';
+import { VoiceRecordingScreen } from './VoiceRecordingScreen';
 
 type MemoryListScreenProps = {
     userId: string;
@@ -22,6 +23,7 @@ type MemoryPreview = {
 type ViewState =
     | { name: 'list' }
     | { name: 'create' }
+    | { name: 'voice-create' }
     | { name: 'detail'; memoryId: string };
 
 export function MemoryListScreen({ userId, userEmail, onLogout }: MemoryListScreenProps) {
@@ -43,7 +45,7 @@ export function MemoryListScreen({ userId, userEmail, onLogout }: MemoryListScre
                     const firstCapture = data?.captures[0];
                     return {
                         memory,
-                        preview: firstCapture?.text ?? 'Empty Memory',
+                        preview: firstCapture?.type === 'text' ? firstCapture.text : firstCapture ? 'Voice recording' : 'Empty Memory',
                         captureCount: data?.captures.length ?? 0,
                     };
                 }));
@@ -72,6 +74,10 @@ export function MemoryListScreen({ userId, userEmail, onLogout }: MemoryListScre
 
     if (view.name === 'create') {
         return <CreateTextMemoryScreen saveText={(text) => repository.createTextMemory(text)} onCancel={() => setView({ name: 'list' })} onSaved={(result) => setView({ name: 'detail', memoryId: result.memory.id })} />;
+    }
+
+    if (view.name === 'voice-create') {
+        return <VoiceRecordingScreen repository={repository} onBack={() => setView({ name: 'list' })} onSaved={(result) => setView({ name: 'detail', memoryId: result.memory.id })} saveAsNewMemory />;
     }
 
     if (view.name === 'detail') {
@@ -109,7 +115,10 @@ export function MemoryListScreen({ userId, userEmail, onLogout }: MemoryListScre
                         ))}
                     </View>
                 )}
-                <Pressable onPress={() => setView({ name: 'create' })} style={styles.primaryButton}><Text style={styles.primaryText}>New Memory</Text></Pressable>
+                <View style={styles.actions}>
+                    <Pressable onPress={() => setView({ name: 'create' })} style={styles.primaryButton}><Text style={styles.primaryText}>New Text Memory</Text></Pressable>
+                    <Pressable onPress={() => setView({ name: 'voice-create' })} style={styles.secondaryButton}><Text style={styles.secondaryText}>New Voice Memory</Text></Pressable>
+                </View>
             </ScrollView>
         </View>
     );
@@ -139,4 +148,7 @@ const styles = StyleSheet.create({
     itemMeta: { color: '#7a746d', fontSize: 13, marginTop: 12 },
     primaryButton: { alignItems: 'center', backgroundColor: '#d96c4f', borderRadius: 8, justifyContent: 'center', marginTop: 24, minHeight: 52, padding: 15 },
     primaryText: { color: '#fffaf3', fontSize: 16, fontWeight: '700' },
+    actions: { gap: 12 },
+    secondaryButton: { alignItems: 'center', borderColor: '#39735b', borderRadius: 8, borderWidth: 1, justifyContent: 'center', marginTop: 12, minHeight: 52, padding: 15 },
+    secondaryText: { color: '#39735b', fontSize: 16, fontWeight: '700' },
 });

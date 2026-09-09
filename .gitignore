@@ -17,3 +17,4 @@ web-build/
 *.p8
 *.p12
 *.mobileprovision
+/.cline-rules/

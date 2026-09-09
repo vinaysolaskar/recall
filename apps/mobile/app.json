@@ -9,6 +9,9 @@
         "ios": {
             "supportsTablet": false
         },
-        "android": {}
+        "android": {},
+        "plugins": [
+            "expo-audio"
+        ]
     }
 }

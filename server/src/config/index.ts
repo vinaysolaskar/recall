@@ -21,5 +21,6 @@ try {
 export const config = {
     supabaseUrl,
     supabaseServiceRoleKey: getRequiredEnvironmentVariable('SUPABASE_SERVICE_ROLE_KEY'),
+    groqApiKey: getRequiredEnvironmentVariable('GROQ_API_KEY'),
     port: Number(process.env.PORT ?? 3000),
 };
