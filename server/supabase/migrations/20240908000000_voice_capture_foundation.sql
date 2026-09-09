@@ -24,7 +24,8 @@ create policy "voice audio: select own objects" on storage.objects
     for select to authenticated
     using (
         bucket_id = 'voice-audio'
-        and (storage.foldername(name))[1] = (select auth.uid()::text)
+        and (storage.foldername(name))[1] = 'users'
+        and (storage.foldername(name))[2] = (select auth.uid()::text)
     );
 
 -- ---------------------------------------------------------------------------
@@ -48,6 +49,10 @@ create table if not exists public.processing_jobs (
     unique (job_type, capture_id)
 );
 
+-- Storage path of the uploaded original audio, needed by the transcription
+-- worker to download the file from the private bucket.
+alter table public.processing_jobs add column if not exists storage_path text;
+
 create index if not exists processing_jobs_user_created_idx
     on public.processing_jobs (user_id, created_at desc);
 
@@ -60,5 +65,35 @@ alter table public.processing_jobs enable row level security;
 -- the service role (bypasses RLS), so users cannot forge or alter jobs.
 drop policy if exists "processing jobs: select own" on public.processing_jobs;
 create policy "processing jobs: select own" on public.processing_jobs
+    for select to authenticated
+    using (user_id = (select auth.uid()));
+
+-- ---------------------------------------------------------------------------
+-- 3) Generated + user-edited transcripts (Day 2 final task)
+-- ---------------------------------------------------------------------------
+-- generated_transcript is written by the transcription worker and never
+-- overwritten by edits; edited_transcript is written by the user and is
+-- authoritative for display/search. Both columns are preserved independently.
+
+create table if not exists public.capture_transcripts (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid not null,
+    memory_id text not null,
+    capture_id text not null,
+    generated_transcript text,
+    edited_transcript text,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (capture_id)
+);
+
+create index if not exists capture_transcripts_user_idx
+    on public.capture_transcripts (user_id);
+
+alter table public.capture_transcripts enable row level security;
+
+-- Users may read their own transcripts; writes are backend-only (service role).
+drop policy if exists "capture transcripts: select own" on public.capture_transcripts;
+create policy "capture transcripts: select own" on public.capture_transcripts
     for select to authenticated
     using (user_id = (select auth.uid()));

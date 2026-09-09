@@ -14,5 +14,6 @@ export interface MemoryRepository {
     addVoiceCapture(memoryId: string, audioUri: string, durationSeconds: number): Promise<MemoryWithCaptures>;
     updateTextCapture(captureId: string, text: string): Promise<MemoryWithCaptures>;
     updateCaptureSync(captureId: string, syncStatus: SyncStatus, syncError?: string | null, processingStatus?: ProcessingStatus): Promise<MemoryWithCaptures>;
+    deleteCapture(captureId: string): Promise<MemoryWithCaptures>;
     deleteMemory(id: string): Promise<void>;
 }

@@ -105,3 +105,55 @@ export async function syncVoiceCapture(
         inFlightCaptures.delete(capture.id);
     }
 }
+
+export async function deleteVoiceCapture(captureId: string): Promise<void> {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    if (!token) {
+        throw new Error('Not signed in.');
+    }
+
+    const response = await fetch(`${apiBaseUrl}/voice/captures/${encodeURIComponent(captureId)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!response.ok) {
+        let message = 'Could not delete the capture.';
+        try {
+            const body = await response.json();
+            if (typeof body?.error === 'string') {
+                message = body.error;
+            }
+        } catch {
+            // Keep the default message when there is no JSON body.
+        }
+        throw new Error(message);
+    }
+}
+
+export async function deleteVoiceMemory(memoryId: string): Promise<void> {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    if (!token) {
+        throw new Error('Not signed in.');
+    }
+
+    const response = await fetch(`${apiBaseUrl}/voice/memories/${encodeURIComponent(memoryId)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!response.ok) {
+        let message = 'Could not delete the memory.';
+        try {
+            const body = await response.json();
+            if (typeof body?.error === 'string') {
+                message = body.error;
+            }
+        } catch {
+            // Keep the default message when there is no JSON body.
+        }
+        throw new Error(message);
+    }
+}

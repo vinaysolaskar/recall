@@ -1,15 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import { Alert, ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+import { supabase } from '../../../infrastructure/supabase/client';
 
 import type { AudioStatus } from 'expo-audio';
 import type { Capture, TextCapture, VoiceCapture } from '../domain/types';
 import type { LocalMemoryRepository } from '../data/localRepository';
 import type { MemoryWithCaptures } from '../data/repository';
-import { syncVoiceCapture } from '../data/voiceSync';
+import { syncVoiceCapture, deleteVoiceCapture, deleteVoiceMemory } from '../data/voiceSync';
+import { fetchVoiceCaptureStatuses, mapJobStatusToProcessing, saveEditedTranscript, type TranscriptStatusMap, type VoiceTranscriptStatus } from '../data/voiceTranscripts';
 import { CreateTextMemoryScreen } from './CreateTextMemoryScreen';
 import { VoiceRecordingScreen } from './VoiceRecordingScreen';
+
+export const MAX_TRANSCRIPT_CHARS = 24000;
 
 type MemoryDetailScreenProps = {
     memoryId: string;
@@ -33,6 +39,11 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
     // looped forever, flashing through sync messages (the reported flicker).
     // A fresh mount clears it, so pending captures still retry on the next open.
     const attemptedSyncIdsRef = useRef<Set<string>>(new Set());
+    // Transcript + processing status loaded from the backend for uploaded captures.
+    const [transcripts, setTranscripts] = useState<TranscriptStatusMap>({});
+    const [editingTranscriptId, setEditingTranscriptId] = useState<string | null>(null);
+    const [transcriptDraft, setTranscriptDraft] = useState('');
+    const [savingTranscript, setSavingTranscript] = useState(false);
 
     // A single player is shared by every Voice Capture on this screen so only one
     // Capture can play at a time. The hook releases the native player on unmount.
@@ -75,6 +86,8 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
         let mounted = true;
         // Each loaded Memory gets its own set of upload attempts.
         attemptedSyncIdsRef.current = new Set();
+        setTranscripts({});
+        setEditingTranscriptId(null);
         repository.getMemory(memoryId).then((result) => {
             if (mounted) {
                 setData(result);
@@ -109,6 +122,57 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
             setPausedCaptureId(activeCaptureId);
         }
     }, [activeCaptureId, addingVoiceCapture, player]);
+
+    // Poll the backend for uploaded voice captures' processing status and transcript.
+    // Polling stops once every visible job settles (COMPLETED or FAILED) so it
+    // does not run forever; a fresh screen load resumes it for new captures.
+    useEffect(() => {
+        if (!data) {
+            return;
+        }
+        const uploadedIds = data.captures
+            .filter((capture): capture is VoiceCapture => capture.type === 'voice' && capture.syncStatus === 'uploaded')
+            .map((capture) => capture.id);
+        if (uploadedIds.length === 0) {
+            return;
+        }
+        let mounted = true;
+        let intervalId: ReturnType<typeof setInterval> | null = null;
+
+        const tick = async () => {
+            try {
+                const statuses = await fetchVoiceCaptureStatuses(uploadedIds);
+                if (!mounted) {
+                    return;
+                }
+                setTranscripts(statuses);
+                const values = Object.values(statuses);
+                const settled = values.length > 0 && values.every((status) => status.jobStatus === 'COMPLETED' || status.jobStatus === 'FAILED');
+                for (const status of values) {
+                    await repository.updateCaptureSync(status.captureId, 'uploaded', null, mapJobStatusToProcessing(status.jobStatus));
+                }
+                if (settled && intervalId) {
+                    clearInterval(intervalId);
+                }
+            } catch {
+                // Offline or processing not ready; keep the current local UI state.
+
+            
+}
+        };
+
+        void tick();
+        intervalId = setInterval(() => {
+            void tick();
+        }, 8000);
+
+        return () => {
+            mounted = false;
+            if (intervalId) {
+                clearInterval(intervalId);
+            }
+        };
+    }, [data, repository]);
 
     function requestPlay(captureId: string) {
         const capture = data?.captures.find((item) => item.id === captureId);
@@ -145,6 +209,105 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
         setPausedCaptureId(null);
         setFinishedCaptureId(null);
     }
+
+    async function saveTranscriptEdit(capture: VoiceCapture) {
+        const trimmed = transcriptDraft.trim();
+        if (trimmed.length > MAX_TRANSCRIPT_CHARS) {
+            setError(`Transcript must be ${MAX_TRANSCRIPT_CHARS.toLocaleString()} characters or fewer.`);
+            return;
+        }
+        setSavingTranscript(true);
+        try {
+            const normalized = trimmed.length === 0 ? null : trimmed;
+            await saveEditedTranscript(capture.id, normalized);
+            setTranscripts((current) => ({
+                ...current,
+                [capture.id]: {
+                    ...(current[capture.id] ?? {
+                        captureId: capture.id,
+                        jobStatus: 'COMPLETED',
+                        jobError: null,
+                        generatedTranscript: null,
+                        editedTranscript: null,
+                    }),
+                    editedTranscript: normalized,
+                },
+            }));
+            setEditingTranscriptId(null);
+            setTranscriptDraft('');
+        } catch (error) {
+            setError(error instanceof Error ? error.message : 'Could not save the transcript.');
+        } finally {
+            setSavingTranscript(false);
+        }
+    }
+
+    function startTranscriptEdit(capture: VoiceCapture) {
+        const status = transcripts[capture.id];
+        setTranscriptDraft(status?.editedTranscript ?? status?.generatedTranscript ?? '');
+        setEditingTranscriptId(capture.id);
+    }
+
+    async function deleteCapture(capture: Capture) {
+        // Optimistically remove the Capture from the local timeline immediately,
+        // then clean up server-side data (transcript, job, storage audio) and
+        // the local audio file for voice Captures. Removing it from `data` also
+        // stops any in-progress upload/sync polling for this Capture.
+        try {
+            if (capture.type === 'voice') {
+                const token = (await supabase.auth.getSession()).data.session?.access_token;
+                if (token) {
+                    try {
+                        await deleteVoiceCapture(capture.id);
+                    } catch (error) {
+                        setError(error instanceof Error ? error.message : 'Could not fully delete the capture online.');
+                    }
+                }
+                if (capture.audioUri) {
+                    await FileSystem.deleteAsync(capture.audioUri, { idempotent: true }).catch(() => undefined);
+                }
+            }
+            setData(await repository.deleteCapture(capture.id));
+            setTranscripts((current) => {
+                if (!current[capture.id]) {
+                    return current;
+                }
+                const next = { ...current };
+                delete next[capture.id];
+                return next;
+            });
+        } catch (error) {
+            setError(error instanceof Error ? error.message : 'Could not delete the capture.');
+        }
+    }
+
+    async function confirmDeleteMemory() {
+        Alert.alert('Delete Memory?', 'This removes the Memory and its Captures from this device.', [
+            { text: 'Cancel', style: 'cancel' },
+            {
+                text: 'Delete',
+                style: 'destructive',
+                onPress: async () => {
+                    try {
+                        const token = (await supabase.auth.getSession()).data.session?.access_token;
+                        if (token) {
+                            try {
+                                await deleteVoiceMemory(memoryId);
+                            } catch (error) {
+                                setError(error instanceof Error ? error.message : 'Could not fully delete the Memory online.');
+                            }
+                        }
+                        await repository.deleteMemory(memoryId);
+                        onBack();
+                    } catch {
+                        setError('Could not delete this Memory locally.');
+                    }
+                },
+            },
+        ]);
+    }
+
+
 
     async function updateCapture(capture: Capture, text: string): Promise<boolean> {
         const normalizedText = text.trim();
@@ -264,13 +427,23 @@ export function MemoryDetailScreen({ memoryId, repository, onBack }: MemoryDetai
                                 ) : (
                                     <VoiceCaptureControls
                                         capture={capture}
+                                        editing={editingTranscriptId === capture.id}
+                                        editError={error}
                                         finished={finishedCaptureId === capture.id}
                                         isActive={activeCaptureId === capture.id}
+                                        onCancelEdit={() => { setEditingTranscriptId(null); setTranscriptDraft(''); }}
+                                        onDraftChange={(value) => setTranscriptDraft(value)}
+                                        onStartEdit={() => startTranscriptEdit(capture)}
                                         onToggle={() => requestPlay(capture.id)}
+                                        onSaveEdit={() => void saveTranscriptEdit(capture)}
                                         paused={pausedCaptureId === capture.id}
                                         playerStatus={playerStatus}
+                                        savingEdit={savingTranscript}
+                                        transcript={transcripts[capture.id]}
+                                        transcriptDraft={transcriptDraft}
                                     />
                                 )}
+                                <Pressable onPress={() => void deleteCapture(capture)} style={styles.deleteCaptureButton}><Text style={styles.deleteCaptureText}>Delete capture</Text></Pressable>
                             </View>
                         </View>
                     ))}
@@ -339,14 +512,23 @@ function formatDate(value: string): string {
 
 type VoiceCaptureControlsProps = {
     capture: VoiceCapture;
-    playerStatus: AudioStatus;
-    isActive: boolean;
-    paused: boolean;
+    editing: boolean;
+    editError: string;
     finished: boolean;
+    isActive: boolean;
+    onCancelEdit: () => void;
+    onDraftChange: (value: string) => void;
+    onStartEdit: () => void;
+    onSaveEdit: () => void;
     onToggle: () => void;
+    paused: boolean;
+    playerStatus: AudioStatus;
+    savingEdit: boolean;
+    transcript: VoiceTranscriptStatus | undefined;
+    transcriptDraft: string;
 };
 
-function VoiceCaptureControls({ capture, playerStatus, isActive, paused, finished, onToggle }: VoiceCaptureControlsProps) {
+function VoiceCaptureControls({ capture, editing, editError, finished, isActive, onCancelEdit, onDraftChange, onStartEdit, onSaveEdit, onToggle, paused, playerStatus, savingEdit, transcript, transcriptDraft }: VoiceCaptureControlsProps) {
     const syncLabel = getSyncLabel(capture);
     let buttonLabel = 'Play';
     if (isActive && paused) {
@@ -356,6 +538,8 @@ function VoiceCaptureControls({ capture, playerStatus, isActive, paused, finishe
     } else if (isActive) {
         buttonLabel = 'Pause';
     }
+
+    const displayTranscript = transcript?.editedTranscript ?? transcript?.generatedTranscript;
 
     return (
         <>
@@ -370,6 +554,29 @@ function VoiceCaptureControls({ capture, playerStatus, isActive, paused, finishe
                 </Text>
             </View>
             <Text style={styles.syncStatus}>{syncLabel}</Text>
+            {displayTranscript ? (
+                <View style={styles.transcriptBox}>
+                    <Text style={styles.transcriptText}>{displayTranscript}</Text>
+                    <Pressable onPress={onStartEdit} style={styles.editButton}><Text style={styles.editText}>Edit transcript</Text></Pressable>
+                </View>
+            ) : transcript?.jobStatus === 'COMPLETED' || transcript?.jobStatus === 'FAILED' ? (
+                <Text style={styles.syncStatus}>
+                    {transcript.jobStatus === 'FAILED'
+                        ? transcript.jobError || 'Transcription failed. The recording stays saved on this device.'
+                        : 'Ready'}
+                </Text>
+            ) : null}
+            {editing ? (
+                <View style={styles.transcriptEditor}>
+                    <TextInput autoCapitalize="sentences" maxLength={MAX_TRANSCRIPT_CHARS} multiline onChangeText={onDraftChange} placeholder="Transcript" placeholderTextColor="#8a8178" scrollEnabled style={styles.editInput} textAlignVertical="top" value={transcriptDraft} />
+                    <Text style={styles.counter}>{transcriptDraft.length.toLocaleString()} / {MAX_TRANSCRIPT_CHARS.toLocaleString()}</Text>
+                    {editError ? <Text style={styles.error}>{editError}</Text> : null}
+                    <View style={styles.editActions}>
+                        <Pressable disabled={savingEdit} onPress={onCancelEdit} style={styles.cancelButton}><Text style={styles.cancelText}>Cancel</Text></Pressable>
+                        <Pressable disabled={savingEdit} onPress={onSaveEdit} style={styles.smallPrimaryButton}>{savingEdit ? <ActivityIndicator color="#fffaf3" /> : <Text style={styles.primaryText}>Save</Text>}</Pressable>
+                    </View>
+                </View>
+            ) : null}
         </>
     );
 }
@@ -443,11 +650,16 @@ const styles = StyleSheet.create({
     playButtonText: { color: '#fffaf3', fontSize: 14, fontWeight: '700' },
     playbackPosition: { color: '#52635b', fontSize: 14, fontVariant: ['tabular-nums'] },
     syncStatus: { color: '#7a746d', fontSize: 13, marginTop: 8 },
+    transcriptBox: { backgroundColor: '#fffaf3', borderColor: '#d9d0c4', borderRadius: 8, borderWidth: 1, marginTop: 10, padding: 12 },
+    transcriptText: { color: '#1d2a24', fontSize: 15, lineHeight: 22 },
+    transcriptEditor: { marginTop: 10 },
     viewCaptureButton: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', paddingTop: 8 },
     viewCaptureText: { color: '#39735b', fontSize: 14, fontWeight: '700' },
     captureText: { color: '#1d2a24', fontSize: 17, lineHeight: 25 },
     editButton: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', paddingTop: 8 },
     editText: { color: '#39735b', fontSize: 14, fontWeight: '600' },
+    deleteCaptureButton: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', paddingTop: 8 },
+    deleteCaptureText: { color: '#b33a32', fontSize: 14, fontWeight: '600' },
     editInput: { backgroundColor: '#fffaf3', borderColor: '#d9d0c4', borderRadius: 8, borderWidth: 1, color: '#1d2a24', height: 220, padding: 12 },
     counter: { color: '#7a746d', fontSize: 13, marginTop: 6, textAlign: 'right' },
     editActions: { flexDirection: 'row', gap: 12, justifyContent: 'flex-end', marginTop: 10 },

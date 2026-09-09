@@ -4,8 +4,11 @@ import { requireAuth, type AuthenticatedUser } from '../auth/middleware.js';
 import {
     VoiceSyncError,
     claimProcessingJob,
+    deleteCaptureData,
+    deleteMemoryData,
     listProcessingJobs,
     parseVoiceSyncInput,
+    parseStableId,
     syncVoiceCapture,
 } from './service.js';
 
@@ -63,5 +66,38 @@ voiceRouter.post('/jobs/:jobId/claim', async (request, response) => {
         }
         console.error('Claiming processing job failed:', error);
         response.status(500).json({ error: 'Could not claim the processing job.' });
+voiceRouter.delete('/captures/:captureId', async (request, response) => {
+    const user = response.locals.user as AuthenticatedUser;
+    try {
+        const captureId = parseStableId(request.params.captureId, 'captureId');
+        const result = await deleteCaptureData(user.id, captureId);
+        response.status(200).json(result);
+    } catch (error) {
+        if (error instanceof VoiceSyncError) {
+            response.status(error.status).json({ error: error.message });
+            return;
+        }
+        console.error('Deleting capture failed:', error);
+        response.status(500).json({ error: 'Could not delete the capture.' });
+    }
+});
+
+voiceRouter.delete('/memories/:memoryId', async (request, response) => {
+    const user = response.locals.user as AuthenticatedUser;
+    try {
+        const memoryId = parseStableId(request.params.memoryId, 'memoryId');
+        await deleteMemoryData(user.id, memoryId);
+        response.status(200).json({ ok: true });
+    } catch (error) {
+        if (error instanceof VoiceSyncError) {
+            response.status(error.status).json({ error: error.message });
+            return;
+        }
+        console.error('Deleting memory failed:', error);
+        response.status(500).json({ error: 'Could not delete the memory.' });
+    }
+});
+
+
     }
 });

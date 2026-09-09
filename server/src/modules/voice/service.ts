@@ -19,6 +19,9 @@ const MIME_TYPES: Record<string, string> = {
 
 const ID_PATTERN = /^[A-Za-z0-9-]{1,128}$/;
 
+// Matches the PRD transcript edit limit (MAX_LLM_INPUT_CHARS).
+export const MAX_TRANSCRIPT_CHARS = 24000;
+
 export class VoiceSyncError extends Error {
     public readonly status: number;
 
@@ -27,6 +30,25 @@ export class VoiceSyncError extends Error {
         this.name = 'VoiceSyncError';
         this.status = status;
     }
+}
+
+export function parseStableId(value: unknown, field: string): string {
+    if (typeof value !== 'string' || !ID_PATTERN.test(value)) {
+        throw new VoiceSyncError(`${field} must be a stable id of letters, digits and dashes.`);
+    }
+    return value;
+}
+
+export function parseCaptureIdList(value: unknown): string[] {
+    const raw = Array.isArray(value) ? value.join(',') : typeof value === 'string' ? value : '';
+    const unique = [...new Set(raw.split(',').map((id) => id.trim()).filter((id) => id.length > 0))];
+    if (unique.length === 0) {
+        throw new VoiceSyncError('captureIds is required.');
+    }
+    if (unique.length > 50) {
+        throw new VoiceSyncError('Too many captureIds requested.');
+    }
+    return unique.map((id) => parseStableId(id, 'captureId'));
 }
 
 export type VoiceSyncInput = {
@@ -82,10 +104,7 @@ export function parseVoiceSyncInput(body: unknown): VoiceSyncInput {
 }
 
 function parseId(value: unknown, field: string): string {
-    if (typeof value !== 'string' || !ID_PATTERN.test(value)) {
-        throw new VoiceSyncError(`${field} must be a stable id of letters, digits and dashes.`);
-    }
-    return value;
+    return parseStableId(value, field);
 }
 
 export function buildStoragePath(userId: string, memoryId: string, captureId: string, extension: string): string {
@@ -114,7 +133,7 @@ export async function syncVoiceCapture(userId: string, input: VoiceSyncInput): P
         throw new VoiceSyncError('The audio could not be stored. Please try again later.', 502);
     }
 
-    const job = await ensureTranscriptionJob(userId, input.memoryId, input.captureId);
+    const job = await ensureTranscriptionJob(userId, storagePath, input.memoryId, input.captureId);
     return {
         storagePath,
         jobId: job?.id ?? null,
@@ -126,16 +145,28 @@ function isAlreadyExistsError(error: { message?: string }): boolean {
     return typeof error.message === 'string' && error.message.toLowerCase().includes('already exists');
 }
 
-async function ensureTranscriptionJob(userId: string, memoryId: string, captureId: string): Promise<ProcessingJob | null> {
+async function ensureTranscriptionJob(userId: string, storagePath: string, memoryId: string, captureId: string): Promise<ProcessingJob | null> {
     // Idempotent: a capture has exactly one transcription job (unique in the DB).
     const { data: existing } = await supabase
         .from('processing_jobs')
-        .select('id, status')
+        .select('id, status, storage_path')
         .eq('capture_id', captureId)
         .eq('job_type', 'TRANSCRIPTION')
         .maybeSingle();
 
     if (existing) {
+        // A crash may have left the job without a storage path before the sync
+        // finished creating the job. Backfill it now so the worker can proceed.
+        if (!existing.storage_path) {
+            const { error: backfillError } = await supabase
+                .from('processing_jobs')
+                .update({ storage_path: storagePath, updated_at: new Date().toISOString() })
+                .eq('capture_id', captureId)
+                .eq('job_type', 'TRANSCRIPTION');
+            if (backfillError) {
+                console.error('Could not backfill job storage path:', backfillError.message);
+            }
+        }
         return existing as ProcessingJob;
     }
 
@@ -147,6 +178,7 @@ async function ensureTranscriptionJob(userId: string, memoryId: string, captureI
             capture_id: captureId,
             job_type: 'TRANSCRIPTION',
             status: 'PENDING',
+            storage_path: storagePath,
         })
         .select('id, status')
         .single();
@@ -189,6 +221,117 @@ export async function listProcessingJobs(userId: string): Promise<unknown[]> {
     }
 
     return data ?? [];
+}
+
+export async function deleteCaptureData(userId: string, captureId: string): Promise<{ storagePath: string | null }> {
+    // Deletes all server-side data for a single voice Capture: transcript row,
+    // processing job, and the Supabase Storage audio object. Ownership is
+    // enforced by scoping every query to the authenticated userId. The local
+    // audio file is the client's responsibility.
+    const storagePath = await deleteTranscriptAndJob(userId, captureId);
+    if (storagePath) {
+        await deleteStorageObject(storagePath);
+    }
+    return { storagePath };
+}
+
+export async function deleteMemoryData(userId: string, memoryId: string): Promise<void> {
+    // Cascades deletion for an entire Memory: every capture's transcript + job,
+    // then every Storage audio object under the user-scoped memory path.
+    const { data: jobs, error: jobsError } = await supabase
+        .from('processing_jobs')
+        .select('capture_id, storage_path')
+        .eq('user_id', userId)
+        .eq('memory_id', memoryId)
+        .eq('job_type', 'TRANSCRIPTION');
+
+    if (jobsError) {
+        throw new VoiceSyncError('Could not load captures for deletion.', 500);
+    }
+
+    const captureIds = (jobs ?? []).map((job) => job.capture_id);
+    const storagePaths = (jobs ?? [])
+        .map((job) => job.storage_path)
+        .filter((path): path is string => typeof path === 'string' && path.length > 0);
+
+    if (captureIds.length > 0) {
+        await deleteTranscriptsAndJobs(userId, memoryId, captureIds);
+    }
+    for (const storagePath of storagePaths) {
+        await deleteStorageObject(storagePath);
+    }
+}
+
+async function deleteTranscriptAndJob(userId: string, captureId: string): Promise<string | null> {
+    const { data: job, error: jobError } = await supabase
+        .from('processing_jobs')
+        .select('storage_path')
+        .eq('user_id', userId)
+        .eq('capture_id', captureId)
+        .eq('job_type', 'TRANSCRIPTION')
+        .maybeSingle();
+
+    if (jobError) {
+        throw new VoiceSyncError('Could not load the capture job for deletion.', 500);
+    }
+
+    const { error: transcriptError } = await supabase
+        .from('capture_transcripts')
+        .delete()
+        .eq('user_id', userId)
+        .eq('capture_id', captureId);
+
+    if (transcriptError) {
+        throw new VoiceSyncError('Could not delete the transcript.', 500);
+    }
+
+    const { error: deleteJobError } = await supabase
+        .from('processing_jobs')
+        .delete()
+        .eq('user_id', userId)
+        .eq('capture_id', captureId)
+        .eq('job_type', 'TRANSCRIPTION');
+
+    if (deleteJobError) {
+        throw new VoiceSyncError('Could not delete the processing job.', 500);
+    }
+
+    return job?.storage_path ?? null;
+}
+
+async function deleteTranscriptsAndJobs(userId: string, memoryId: string, captureIds: string[]): Promise<void> {
+    const { error: transcriptError } = await supabase
+        .from('capture_transcripts')
+        .delete()
+        .eq('user_id', userId)
+        .eq('memory_id', memoryId)
+        .in('capture_id', captureIds);
+
+    if (transcriptError) {
+        throw new VoiceSyncError('Could not delete transcripts.', 500);
+    }
+
+    const { error: jobError } = await supabase
+        .from('processing_jobs')
+        .delete()
+        .eq('user_id', userId)
+        .eq('memory_id', memoryId)
+        .in('capture_id', captureIds)
+        .eq('job_type', 'TRANSCRIPTION');
+
+    if (jobError) {
+        throw new VoiceSyncError('Could not delete processing jobs.', 500);
+    }
+}
+
+async function deleteStorageObject(storagePath: string): Promise<void> {
+    const { error } = await supabase.storage.from(VOICE_BUCKET).remove([storagePath]);
+    if (error) {
+        // Log safe metadata only (no audio contents). A failed storage delete
+        // should not silently report full success.
+        console.error(`[voice] Could not delete storage object: ${storagePath} (${error.message})`);
+        throw new VoiceSyncError('Could not delete the stored audio.', 502);
+    }
 }
 
 export async function claimProcessingJob(userId: string, jobId: string): Promise<ProcessingJob | null> {

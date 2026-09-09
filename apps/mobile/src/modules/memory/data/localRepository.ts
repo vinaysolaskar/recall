@@ -220,6 +220,34 @@ export class LocalMemoryRepository implements MemoryRepository {
         };
     }
 
+    public async deleteCapture(captureId: string): Promise<MemoryWithCaptures> {
+        const data = await this.readData();
+        const capture = data.captures.find((item) => item.id === captureId);
+        if (!capture) {
+            throw new Error('Capture not found.');
+        }
+
+        const now = new Date().toISOString();
+        const remainingCaptures = data.captures.filter((item) => item.id !== captureId);
+        const memoryIndex = data.memories.findIndex((item) => item.id === capture.memoryId);
+
+        if (memoryIndex !== -1) {
+            data.memories[memoryIndex] = { ...data.memories[memoryIndex], updatedAt: now };
+        }
+
+        await this.writeData({ memories: data.memories, captures: remainingCaptures });
+
+        const memory = data.memories.find((item) => item.id === capture.memoryId);
+        if (!memory) {
+            throw new Error('Memory not found.');
+        }
+
+        return {
+            memory,
+            captures: sortCaptures(remainingCaptures.filter((item) => item.memoryId === capture.memoryId)),
+        };
+    }
+
     public async deleteMemory(id: string): Promise<void> {
         const data = await this.readData();
         await this.writeData({
